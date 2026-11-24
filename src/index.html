@@ -25,6 +25,18 @@
           <h2 id="setup-title">检测设置</h2>
           <button id="refresh" class="secondary" type="button">刷新连接</button>
         </div>
+        <div class="codex-selector" aria-label="Codex 程序设置">
+          <div class="codex-selection-head">
+            <strong>Codex 程序</strong>
+            <span id="codex-mode" class="secondary-text">自动查找（PATH）</span>
+          </div>
+          <p id="codex-path" class="mono codex-path" aria-live="polite">正在查找…</p>
+          <div class="codex-actions">
+            <button id="choose-codex" class="secondary" type="button">选择 Codex…</button>
+            <button id="use-path-codex" class="secondary" type="button" disabled>恢复 PATH 自动查找</button>
+          </div>
+          <p class="fine-print">默认从 PATH 查找；手动选择会保存，切换后自动刷新连接。</p>
+        </div>
         <dl class="connection-details">
           <div><dt>Codex 登录方式</dt><dd id="account">读取中…</dd></div>
           <div><dt>检测通道</dt><dd id="route">读取中…</dd></div>

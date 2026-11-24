@@ -10,6 +10,8 @@ const model = get<HTMLSelectElement>('model');
 const start = get<HTMLButtonElement>('start');
 const cancel = get<HTMLButtonElement>('cancel');
 const refresh = get<HTMLButtonElement>('refresh');
+const chooseCodex = get<HTMLButtonElement>('choose-codex');
+const usePathCodex = get<HTMLButtonElement>('use-path-codex');
 const exportButton = get<HTMLButtonElement>('export');
 const refreshBank = get<HTMLButtonElement>('refresh-bank');
 const sampleList = get('samples');
@@ -118,7 +120,7 @@ function renderResult(run: Detection | null) {
   const metadata = make('div', undefined, 'evidence-meta');
   metadata.append(make('span', `请求 ${run.model}${run.effort ? ` · ${run.effort}` : ''}`));
   metadata.append(make('span', `${accountText[run.account]} · ${run.route.provider} · ${run.route.origin}`));
-  metadata.append(make('span', `Codex ${run.codexVersion} · SDK ${run.sdk}`));
+  metadata.append(make('span', `Codex ${run.codexVersion} · ${run.executablePath} · SDK ${run.sdk}`));
   if (run.bank) metadata.append(make('span', `快照 ${date(run.bank.builtAt)} · ${run.bank.sha256.slice(0, 12)}`));
   evidence.append(metadata, make('p', 'Codex 采样事件未报告实际推理模型。路由记录来自本机提供方与本次进程配置。', 'fine-print'));
   if (run.route.kind === 'chatgpt') {
@@ -168,6 +170,10 @@ function render(state: DesktopState) {
     : route?.kind === 'custom' ? `网关 ${route.origin} · 复用 Codex 托管的 API Key 和网关地址。` : null;
   explain('route-detail', routeMessage);
   explain('connection-message', connection.message);
+  get('codex-mode').textContent = connection.configuredExecutablePath ? '手动指定' : '自动查找（PATH）';
+  get('codex-path').textContent = connection.executablePath ?? connection.configuredExecutablePath
+    ?? (connection.state === 'checking' ? '正在查找…' : '未找到 Codex 程序');
+  get('codex-path').title = connection.executablePath ?? connection.configuredExecutablePath ?? '';
 
   const key = JSON.stringify(connection.models);
   if (key !== modelListKey) {
@@ -187,14 +193,17 @@ function render(state: DesktopState) {
     model.replaceChildren(option);
   }
 
-  const ready = connection.state === 'ready' && !running && !starting;
+  const ready = connection.state === 'ready' && !running && !starting && !state.changingCodex;
   model.disabled = !ready;
   start.disabled = !ready;
   start.hidden = Boolean(running);
   cancel.hidden = !running;
   cancel.disabled = cancelling;
   cancel.textContent = cancelling ? '正在取消…' : '取消';
-  refresh.disabled = Boolean(running || starting || connection.state === 'checking');
+  const busy = Boolean(running || starting || state.changingCodex || connection.state === 'checking');
+  refresh.disabled = busy;
+  chooseCodex.disabled = busy;
+  usePathCodex.disabled = busy || (connection.state !== 'error' && !connection.configuredExecutablePath);
   exportButton.disabled = !detection || running || exporting || exportedRun === detection.id;
   renderProgress(detection);
   renderResult(detection);
@@ -217,6 +226,8 @@ cancel.addEventListener('click', () => {
   void api.cancel();
 });
 refresh.addEventListener('click', () => { void api.refreshConnection(); });
+chooseCodex.addEventListener('click', () => { void api.chooseCodex(); });
+usePathCodex.addEventListener('click', () => { void api.usePathCodex(); });
 refreshBank.addEventListener('click', () => { void api.refreshBank(); });
 exportButton.addEventListener('click', async () => {
   exporting = true;

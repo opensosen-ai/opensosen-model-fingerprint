@@ -23,6 +23,8 @@ export interface Connection {
   route: Route | null;
   models: ModelChoice[];
   message: string | null;
+  configuredExecutablePath: string | null;
+  executablePath: string | null;
 }
 
 export interface BankInfo {
@@ -53,6 +55,7 @@ export interface Detection {
   startedAt: string;
   finishedAt: string | null;
   codexVersion: string;
+  executablePath: string;
   sdk: '0.2.0';
   account: AccountMode;
   model: string;
@@ -70,11 +73,14 @@ export interface DesktopState {
   connection: Connection;
   bank: BankState;
   detection: Detection | null;
+  changingCodex: boolean;
 }
 
 export interface DesktopApi {
   state(): Promise<DesktopState>;
   refreshConnection(): Promise<void>;
+  chooseCodex(): Promise<void>;
+  usePathCodex(): Promise<void>;
   refreshBank(): Promise<void>;
   start(model: string): Promise<boolean>;
   cancel(): Promise<void>;

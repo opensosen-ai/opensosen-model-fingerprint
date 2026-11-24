@@ -5,10 +5,15 @@ OpenSosen 模型指纹是一款 Windows x64 桌面应用。它通过本机已登
 ## 快速使用
 
 从 GitHub Releases 下载 Windows x64 便携版 `.exe`，双击即可打开。首次打开时，请稍候片刻，让程序将内置运行库展开到临时目录。关闭应用后，启动器会清理此次展开的文件。[下载最新版本](https://github.com/opensosen-ai/opensosen-model-fingerprint/releases/latest)
+检测前请先在本机安装并登录官方 Windows x64 Codex CLI。应用默认按当前进程的 `PATH` 顺序查找 Codex，并使用第一个找到的 `codex.exe` 或官方 npm 原生程序。
 
-检测前请先在本机安装并登录官方 Windows x64 Codex CLI。应用支持原生 `codex.exe`，也能通过官方 npm 安装的 `codex.cmd` 定位其原生程序。
+如果本机有多个 Codex 版本，点击“选择 Codex…”选择具体的 `codex.exe`。选择会保存到应用用户目录，之后刷新连接和检测都会使用这个程序；程序路径、版本和通道会显示在界面中。点击“恢复 PATH 自动查找”即可取消固定选择，回到默认行为。检测运行中不能切换程序。
 
-界面显示 Codex 登录方式、提供方、参考库快照，及三次采样的实际数字计数。选择列表里的文本模型并点击 **开始检测**。可随时取消。完成后可展开每次挑战和原始回复。点击 **导出 JSON** 会把证据保存到当前用户的 `文档\OpenSosen Model Fingerprint\证据`，窗口会显示完整路径。
+选择路径后，如果程序被移动或删除，应用不会静默改用 PATH 中的另一个版本；请重新选择，或点击“恢复 PATH 自动查找”。
+
+应用支持原生 `codex.exe`，也能通过官方 npm 安装的 `codex.cmd` 定位其原生程序。
+
+应用会保留已有的 `CODEX_HOME` / `CODEX_SQLITE_HOME` 设置；未设置 `CODEX_SQLITE_HOME` 时，会自动从 `%LOCALAPPDATA%\OpenSosen Model Fingerprint\sqlite\` 中为所选 Codex 可执行文件创建并复用独立数据库，Codex 文件更新后会使用新的数据库目录，避免不同版本共用迁移状态。若没设置 `CODEX_HOME`，软件会复用已有的 `%USERPROFILE%\.codex` 登录目录；若设置了显式 `sqlite_home` 配置，则仍按 Codex 自身的优先级使用该配置。首次连接可能需要等待较长时间完成数据库初始化。
 
 ## Codex 通道
 

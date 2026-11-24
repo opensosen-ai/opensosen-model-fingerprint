@@ -106,7 +106,7 @@ export interface CollectOptions {
 export function makeDetection(codex: ReadyCodex, model: ModelChoice): Detection {
   return {
     id: crypto.randomUUID(), startedAt: new Date().toISOString(), finishedAt: null,
-    codexVersion: codex.connection.version, sdk: '0.2.0', account: codex.connection.account,
+    codexVersion: codex.connection.version, executablePath: codex.executable, sdk: '0.2.0', account: codex.connection.account,
     model: model.id, effort: model.effort, route: codex.connection.route, transport: 'codex exec --json',
     status: 'running', bank: null, analysis: null, message: null,
     samples: generateChallenges(3).map((challenge: Challenge) => ({

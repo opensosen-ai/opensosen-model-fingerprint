@@ -1,9 +1,10 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ReferenceBank } from './bank.js';
 import { emptyConnection, inspectCodex, publicError, type ReadyCodex } from './codex.js';
 import { collect, makeDetection } from './collect.js';
+import { CodexSelection } from './codex-selection.js';
 import type { Connection, DesktopState, Detection } from './types.js';
 
 const PRODUCT_NAME = 'OpenSosen Model Fingerprint';
@@ -17,13 +18,18 @@ let connection: Connection = emptyConnection('checking');
 let detection: Detection | null = null;
 let ready: ReadyCodex | null = null;
 let refreshing: Promise<void> | null = null;
+let changingCodex: Promise<void> | null = null;
 let active: { controller: AbortController; done: Promise<void> } | null = null;
 let quitting = false;
 const lifetime = new AbortController();
 const bank = new ReferenceBank(join(app.getPath('userData'), 'reference'), publish);
+const codexSelection = new CodexSelection(join(app.getPath('userData'), 'codex-selection.json'));
 
 function state(): DesktopState {
-  return { connection, bank: bank.state, detection };
+  return {
+    connection: { ...connection, configuredExecutablePath: codexSelection.path },
+    bank: bank.state, detection, changingCodex: changingCodex !== null,
+  };
 }
 
 function publish() {
@@ -33,9 +39,10 @@ function publish() {
 function refreshConnection() {
   if (active || lifetime.signal.aborted) return;
   if (refreshing) return refreshing;
-  connection = { ...connection, state: 'checking', message: null };
+  connection = { ...emptyConnection('checking'), configuredExecutablePath: codexSelection.path };
+  ready = null;
   publish();
-  refreshing = inspectCodex(lifetime.signal).then((result) => {
+  refreshing = inspectCodex(lifetime.signal, codexSelection.path).then((result) => {
     ready = result.ready;
     connection = result.connection;
   }).catch((error: unknown) => {
@@ -46,6 +53,35 @@ function refreshConnection() {
     publish();
   });
   return refreshing;
+}
+
+function changeCodex(usePath: boolean) {
+  if (!window || active || refreshing || changingCodex || lifetime.signal.aborted) return;
+  const owner = window;
+  changingCodex = (async () => {
+    let path: string | null = null;
+    if (!usePath) {
+      const result = await dialog.showOpenDialog(owner, {
+        title: '选择 Codex 程序',
+        defaultPath: codexSelection.path ?? connection.executablePath ?? undefined,
+        filters: [{ name: 'Codex 可执行程序', extensions: ['exe'] }],
+        properties: ['openFile'],
+      });
+      if (result.canceled || !result.filePaths[0] || lifetime.signal.aborted) return;
+      path = result.filePaths[0];
+    }
+    await codexSelection.save(path);
+    ready = null;
+    detection = null;
+    await refreshConnection();
+  })().catch((error: unknown) => {
+    connection = { ...connection, message: publicError(error) };
+  }).finally(() => {
+    changingCodex = null;
+    publish();
+  });
+  publish();
+  return changingCodex;
 }
 
 function markUnsent(run: Detection, cancelled: boolean, message: string | null) {
@@ -62,7 +98,7 @@ function markUnsent(run: Detection, cancelled: boolean, message: string | null) 
 
 function start(modelId: unknown) {
   const prior = ready;
-  if (lifetime.signal.aborted || active || refreshing || connection.state !== 'ready' || !prior || typeof modelId !== 'string') return false;
+  if (lifetime.signal.aborted || active || refreshing || changingCodex || connection.state !== 'ready' || !prior || typeof modelId !== 'string') return false;
   const model = prior.connection.models.find(({ id }) => id === modelId);
   if (!model) return false;
 
@@ -70,15 +106,15 @@ function start(modelId: unknown) {
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, lifetime.signal]);
   const done = (async () => {
-    const inspected = await inspectCodex(signal);
+    const inspected = await inspectCodex(signal, codexSelection.path);
     if (signal.aborted) { markUnsent(run, true, null); return; }
     const current = ready = inspected.ready;
     connection = inspected.connection;
     const currentModel = current?.connection.models.find(({ id }) => id === modelId);
-    if (!current || !currentModel || current.connection.account !== prior.connection.account ||
+    if (!current || !currentModel || current.executable !== prior.executable || current.connection.account !== prior.connection.account ||
       current.connection.version !== prior.connection.version || currentModel.effort !== model.effort ||
       JSON.stringify(current.routeConfig) !== JSON.stringify(prior.routeConfig)) {
-      markUnsent(run, false, inspected.connection.message ?? 'Codex 登录、模型或路由已变化，请核对界面后重新开始。');
+      markUnsent(run, false, inspected.connection.message ?? 'Codex 程序、登录、模型或路由已变化，请核对界面后重新开始。');
       return;
     }
     await collect(current, currentModel, run, { signal, update: publish, bank: () => bank.snapshot });
@@ -117,7 +153,9 @@ async function exportEvidence() {
 function registerIpc() {
   const handlers = {
     'fingerprint:read': state,
-    'fingerprint:refresh-connection': refreshConnection,
+    'fingerprint:refresh-connection': () => { if (!changingCodex) return refreshConnection(); },
+    'fingerprint:choose-codex': () => changeCodex(false),
+    'fingerprint:use-path-codex': () => changeCodex(true),
     'fingerprint:refresh-bank': () => bank.refresh(),
     'fingerprint:start': start,
     'fingerprint:cancel': () => { active?.controller.abort(); },
@@ -158,15 +196,18 @@ else {
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', (event) => {
     lifetime.abort();
-    if (quitting || (!refreshing && !active)) return;
+    if (quitting || (!refreshing && !active && !changingCodex)) return;
     event.preventDefault();
     quitting = true;
-    void Promise.allSettled([refreshing, active?.done]).then(() => app.quit());
+    void Promise.allSettled([refreshing, active?.done, changingCodex]).then(() => app.quit());
   });
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
+    let loaded = true;
+    try { await codexSelection.load(); }
+    catch (error) { loaded = false; connection = emptyConnection('error', publicError(error)); }
     registerIpc();
     createWindow();
-    void refreshConnection();
+    if (loaded) void refreshConnection();
     void bank.refresh();
   });
 }

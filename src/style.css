@@ -59,6 +59,11 @@ main {
 dt { color: var(--muted); font-size: 12px; }
 dd { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
 .callout { background: #fff7e7; color: #664618; border: 1px solid #efd9a9; border-radius: 8px; padding: 8px 10px; margin-top: 8px; overflow-wrap: anywhere; }
+.codex-selector { margin-bottom: 14px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: #f9fbfc; }
+.codex-selection-head, .codex-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.codex-selection-head { justify-content: space-between; }
+.codex-selection-head span { font-size: 12px; }
+.codex-path { margin: 7px 0 10px; overflow-wrap: anywhere; user-select: text; }
 
 form { margin-top: 17px; }
 form label { display: block; font-weight: 650; margin-bottom: 5px; }

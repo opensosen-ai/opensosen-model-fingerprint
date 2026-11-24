@@ -26,7 +26,10 @@ export interface Inspection {
 }
 
 export function emptyConnection(state: Connection['state'], message: string | null = null): Connection {
-  return { state, account: null, version: null, configuredProvider: null, route: null, models: [], message };
+  return {
+    state, account: null, version: null, configuredProvider: null, route: null, models: [], message,
+    configuredExecutablePath: null, executablePath: null,
+  };
 }
 
 export function accountMode(response: Fields): AccountMode {
@@ -140,20 +143,25 @@ async function modelChoices(server: AppServer, provider: string, signal: AbortSi
   return [...models.values()];
 }
 
-export async function inspectCodex(signal: AbortSignal): Promise<Inspection> {
-  const executable = await findCodex();
+export async function inspectCodex(signal: AbortSignal, configuredExecutablePath: string | null = null): Promise<Inspection> {
+  const executable = await findCodex(configuredExecutablePath);
   if (!executable) return {
-    connection: emptyConnection('missing', '找不到官方 Codex CLI。安装 Windows 版 Codex CLI 并让 codex.exe 或官方 npm 的 codex.cmd 可通过 PATH 找到，然后刷新。'),
+    connection: emptyConnection('missing', configuredExecutablePath
+      ? `找不到已选择的 Codex：${configuredExecutablePath}`
+      : '找不到官方 Codex CLI。请让 codex.exe 或官方 npm 的 codex.cmd 可通过 PATH 找到，然后刷新。'),
     ready: null,
   };
 
   return withEmptyDirectory(async (cwd) => {
     const current = new AppServer(executable, cwd, PROBE_CONFIG);
-    const official = new AppServer(executable, cwd, OFFICIAL_ACCOUNT_PROBE);
-    const connection = emptyConnection('checking');
+    let official: AppServer | null = null;
+    const connection = { ...emptyConnection('checking'), configuredExecutablePath, executablePath: executable };
     try {
-      const [version] = await Promise.all([current.initialize(signal), official.initialize(signal)]);
+      // Initialize the first app-server fully before starting another against the same SQLite home.
+      const version = await current.initialize(signal);
       connection.version = version;
+      official = new AppServer(executable, cwd, OFFICIAL_ACCOUNT_PROBE);
+      await official.initialize(signal);
       const [configured, activeAccount, officialAccount] = await Promise.all([
         current.request('modelProvider/list', {}, signal),
         current.request('account/read', { refreshToken: false }, signal),
@@ -188,7 +196,7 @@ export async function inspectCodex(signal: AbortSignal): Promise<Inspection> {
     } catch (error) {
       return { connection: { ...connection, state: 'error', message: publicError(error) }, ready: null };
     } finally {
-      await Promise.all([current.close(), official.close()]);
+      await Promise.all([current.close(), official?.close()]);
     }
   });
 }

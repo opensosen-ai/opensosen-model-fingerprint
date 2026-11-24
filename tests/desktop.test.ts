@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import type { Detector, Output } from 'lmfpd-sdk';
 import { emptySnapshot } from './bank-snapshot.js';
 import { ReferenceBank } from '../src/bank.js';
 import { verifyCache } from '../src/bank-integrity.js';
-import { accountMode, chooseRoute, sameAccount, type ReadyCodex } from '../src/codex.js';
-import { savedLoginEnvironment } from '../src/codex-process.js';
+import { accountMode, chooseRoute, emptyConnection, sameAccount, type ReadyCodex } from '../src/codex.js';
+import { findCodex, savedLoginEnvironment } from '../src/codex-process.js';
+import { CodexSelection } from '../src/codex-selection.js';
 import { finishDetection, makeDetection, sampleArgs, textOnlyModel, type CollectOptions } from '../src/collect.js';
 import type { ModelChoice } from '../src/types.js';
 
@@ -26,10 +27,66 @@ function readyFrom(account: 'apiKey' | 'chatgpt'): ReadyCodex {
   const { route, config } = chooseRoute(account, gateway, official, account === 'apiKey');
   return {
     executable: 'codex.exe', routeConfig: config, bundled: new Map(),
-    connection: { state: 'ready', account, version: '0.171.0', configuredProvider: 'gateway', route, models: [model], message: null },
+    connection: { ...emptyConnection('ready'), state: 'ready', account, version: '0.171.0', configuredProvider: 'gateway', route, models: [model] },
   };
 }
 
+test('manual Codex selection survives restart, never falls back when missing, and can return to PATH', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'opensosen-codex-selection-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const automatic = join(dir, 'codex.exe');
+  const explicit = join(dir, 'custom codex.exe');
+  await writeFile(automatic, 'fixture');
+  await writeFile(explicit, 'fixture');
+  const originalPath = process.env.Path;
+  process.env.Path = dir;
+  t.after(() => { if (originalPath === undefined) delete process.env.Path; else process.env.Path = originalPath; });
+  const file = join(dir, 'settings', 'codex-selection.json');
+  const selection = new CodexSelection(file);
+  await selection.load();
+  assert.equal(await findCodex(selection.path), automatic);
+  await selection.save(explicit);
+  const reopened = new CodexSelection(file);
+  await reopened.load();
+  assert.equal(await findCodex(reopened.path), explicit);
+  await rm(explicit);
+  assert.equal(await findCodex(reopened.path), null);
+  await reopened.save(null);
+  const reset = new CodexSelection(file);
+  await reset.load();
+  assert.equal(await findCodex(reset.path), automatic);
+});
+
+test('invalid Codex selections do not replace the saved executable', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'opensosen-codex-selection-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const executable = join(dir, 'codex.exe');
+  await writeFile(executable, 'fixture');
+  const selection = new CodexSelection(join(dir, 'selection.json'));
+  await selection.save(executable);
+  const directory = join(dir, 'directory.exe');
+  await mkdir(directory);
+  for (const invalid of [directory, join(dir, 'missing.exe'), 'codex.exe', join(dir, 'codex.cmd')]) {
+    await assert.rejects(selection.save(invalid));
+    assert.equal(selection.path, executable);
+  }
+  const reopened = new CodexSelection(join(dir, 'selection.json'));
+  await reopened.load();
+  assert.equal(reopened.path, executable);
+});
+
+test('corrupt Codex settings require an explicit reset rather than silently selecting another program', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'opensosen-codex-selection-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'selection.json');
+  await writeFile(file, '{broken');
+  const selection = new CodexSelection(file);
+  await assert.rejects(selection.load());
+  await selection.save(null);
+  const reopened = new CodexSelection(file);
+  await reopened.load();
+  assert.equal(reopened.path, null);
+});
 test('ChatGPT keeps the official endpoint and rejects an unconfirmed provider override', () => {
   const ready = readyFrom('chatgpt');
   assert.deepEqual(ready.connection.route, { kind: 'chatgpt', origin: 'https://chatgpt.com', provider: 'openai' });
@@ -52,17 +109,55 @@ test('API Key preserves the configured Responses path and rejects unprojectable 
   }, official, true));
 });
 
-test('credential mode and account identity checks use public metadata', () => {
+test('Codex preserves explicit profiles and API-key safety while isolating SQLite for standalone launches', async (t) => {
   assert.equal(accountMode({ account: null }), 'signedOut');
   assert.equal(accountMode({ account: { type: 'gcp' } }), 'other');
   const chatgpt = { account: { type: 'chatgpt', workspaceName: 'Personal' }, userId: 'public-test-id' };
   assert(sameAccount(chatgpt, structuredClone(chatgpt)));
   assert(!sameAccount(chatgpt, { ...chatgpt, userId: 'another-test-id' }));
   assert(!sameAccount(chatgpt, { account: { type: 'apiKey' } }));
-  const env = savedLoginEnvironment({ Path: 'test-path', CODEX_HOME: 'test-directory', Codex_Api_Key: 'fixture', OPENAI_API_KEY: 'fixture', CODEX_ACCESS_TOKEN: 'fixture' });
-  const pass: Record<string, unknown> = {};
-  for (const key in env) pass[key] = env[key];
-  assert.deepEqual(pass, { Path: 'test-path', CODEX_HOME: 'test-directory' });
+
+  const userProfile = await mkdtemp(join(tmpdir(), 'opensosen-codex-environment-'));
+  t.after(() => rm(userProfile, { recursive: true, force: true }));
+  const executable = join(userProfile, 'codex.exe');
+  await writeFile(executable, 'first Codex build');
+  const inherited: NodeJS.ProcessEnv = {
+    Path: 'test-path', USERPROFILE: userProfile, LOCALAPPDATA: join(userProfile, 'Local'),
+    CODEX_HOME: join(userProfile, '.codex'),
+    Codex_Api_Key: 'fixture', OPENAI_API_KEY: 'fixture', CODEX_ACCESS_TOKEN: 'fixture',
+  };
+  const env = savedLoginEnvironment(inherited, executable);
+  assert.equal(env.CODEX_HOME, inherited.CODEX_HOME);
+  assert.equal(inherited.CODEX_SQLITE_HOME, undefined);
+  const sqliteHome = env.CODEX_SQLITE_HOME!;
+  assert.equal(relative(join(inherited.LOCALAPPDATA!, 'OpenSosen Model Fingerprint', 'sqlite'), sqliteHome).includes('..'), false);
+  assert.equal((await stat(sqliteHome)).isDirectory(), true);
+  assert.equal(savedLoginEnvironment(inherited, executable).CODEX_SQLITE_HOME, sqliteHome);
+  await writeFile(executable, 'a different updated Codex build');
+  assert.notEqual(savedLoginEnvironment(inherited, executable).CODEX_SQLITE_HOME, sqliteHome);
+
+  const passed: Record<string, unknown> = {};
+  for (const key in env) passed[key] = env[key];
+  assert.deepEqual(passed, {
+    Path: inherited.Path, USERPROFILE: userProfile, LOCALAPPDATA: inherited.LOCALAPPDATA,
+    CODEX_HOME: inherited.CODEX_HOME, CODEX_SQLITE_HOME: sqliteHome,
+  });
+
+  const configuredSqliteHome = join(userProfile, 'project-sqlite');
+  const explicit = savedLoginEnvironment({ ...inherited, CODEX_SQLITE_HOME: configuredSqliteHome }, executable);
+  assert.equal(explicit.CODEX_SQLITE_HOME, configuredSqliteHome);
+  const mixedCase = savedLoginEnvironment({ ...inherited, codex_sqlite_home: configuredSqliteHome }, executable);
+  assert.equal(mixedCase.codex_sqlite_home, configuredSqliteHome);
+  assert.equal(mixedCase.CODEX_SQLITE_HOME, undefined);
+  const blank = savedLoginEnvironment({ ...inherited, codex_sqlite_home: ' ' }, executable);
+  assert.equal(blank.codex_sqlite_home, savedLoginEnvironment(inherited, executable).CODEX_SQLITE_HOME);
+  const defaultLogin = savedLoginEnvironment({ LOCALAPPDATA: inherited.LOCALAPPDATA, USERPROFILE: userProfile }, executable);
+  assert.equal(defaultLogin.CODEX_HOME, undefined);
+  await mkdir(join(userProfile, '.codex'));
+  const existingLogin = savedLoginEnvironment({ LOCALAPPDATA: inherited.LOCALAPPDATA, USERPROFILE: userProfile }, executable);
+  assert.equal(existingLogin.CODEX_HOME, join(userProfile, '.codex'));
+  const withoutLocalAppData = savedLoginEnvironment({ USERPROFILE: userProfile }, executable);
+  assert.equal(relative(join(userProfile, 'AppData', 'Local'), withoutLocalAppData.CODEX_SQLITE_HOME!).startsWith('..'), false);
 });
 
 test('sampling launches isolated text turns with distinct exact SDK challenges', () => {
