@@ -1,5 +1,6 @@
-import { AppServer, CodexError, array, bundledModels, findCodex, object, string, withEmptyDirectory, type Fields } from './codex-process.js';
-import type { AccountMode, Connection, ModelChoice, Route } from './types.js';
+import { createHash } from 'node:crypto';
+import { AppServer, CodexError, CodexRpcError, array, bundledModels, codexExecutableIdentity, findCodex, object, string, withEmptyDirectory, type Fields } from './codex-process.js';
+import type { AccountMode, CodexProbeDiagnostic, Connection, ModelChoice, Route } from './types.js';
 
 const OPENAI_API = 'https://api.openai.com/v1';
 const CHATGPT_API = 'https://chatgpt.com/backend-api/codex';
@@ -15,6 +16,8 @@ const OFFICIAL_ACCOUNT_PROBE = { ...PROBE_CONFIG, model_provider: 'openai', open
 
 export interface ReadyCodex {
   executable: string;
+  binaryIdentity: string;
+  accountBinding: string;
   routeConfig: Fields;
   bundled: ReadonlyMap<string, Fields>;
   connection: Connection & { state: 'ready'; account: 'chatgpt' | 'apiKey'; route: Route; version: string };
@@ -32,7 +35,7 @@ export function emptyConnection(state: Connection['state'], message: string | nu
   };
 }
 
-export function accountMode(response: Fields): AccountMode {
+export function accountMode(response: Fields): 'chatgpt' | 'apiKey' | 'signedOut' | 'other' {
   if (response.account === null) return 'signedOut';
   const type = object(response.account).type;
   if (type === 'apiKey' || type === 'chatgpt') return type;
@@ -40,13 +43,21 @@ export function accountMode(response: Fields): AccountMode {
 }
 
 export function sameAccount(first: Fields, second: Fields) {
-  const mode = accountMode(first);
-  if (mode !== accountMode(second)) return false;
-  if (mode !== 'chatgpt') return mode === 'apiKey';
-  const fields = (data: Fields) => [data.userId, object(data.account).email, object(data.account).workspaceName];
-  const selected = fields(first);
-  const candidate = fields(second);
-  return selected.every((value, index) => value === candidate[index]);
+  const binding = accountBinding(first);
+  return binding !== null && binding === accountBinding(second);
+}
+
+function accountBinding(data: Fields) {
+  const mode = accountMode(data);
+  if (mode === 'apiKey') return mode;
+  if (mode !== 'chatgpt') return null;
+  const account = object(data.account);
+  const userId = string(data.userId)?.trim() || null;
+  const email = string(account.email)?.trim() || null;
+  if (!userId && !email) return null;
+  // Keep the identity available for revalidation without exposing the email
+  // or account identifier to the renderer or the exported run.
+  return createHash('sha256').update(JSON.stringify([userId, email, string(account.workspaceName)])).digest('hex');
 }
 
 function endpoint(raw: unknown) {
@@ -61,11 +72,9 @@ function endpoint(raw: unknown) {
 }
 
 export function chooseRoute(account: AccountMode, configured: Fields, official: Fields, requiresOpenaiAuth: boolean) {
-  const provider = string(configured.defaultProviderId);
-  if (!provider) throw new CodexError('Codex 未报告当前提供方。');
   if (account === 'chatgpt') {
     const selected = array(official.data).map(object).find((p) => p.id === 'openai');
-    if (official.defaultProviderId !== 'openai' || !selected || selected.baseUrl !== null) {
+    if (official.defaultProviderId !== 'openai' || !selected || selected.baseUrl !== null || object(selected.settings).type !== 'openai') {
       throw new CodexError('当前 Codex 配置未能确认内置 OpenAI 提供方。官方 ChatGPT 通道未验证。');
     }
     return {
@@ -73,6 +82,8 @@ export function chooseRoute(account: AccountMode, configured: Fields, official: 
       config: { model_provider: 'openai', openai_base_url: CHATGPT_API, chatgpt_base_url: CHATGPT_BACKEND },
     };
   }
+  const provider = string(configured.defaultProviderId);
+  if (!provider) throw new CodexError('Codex 未报告当前提供方。');
   if (account !== 'apiKey' || !requiresOpenaiAuth) {
     throw new CodexError('当前提供方没有报告可复用的 Codex 托管 API Key 登录。');
   }
@@ -109,15 +120,48 @@ export function chooseRoute(account: AccountMode, configured: Fields, official: 
   };
 }
 
-async function findAccountStore(executable: string, cwd: string, expected: Fields, signal: AbortSignal) {
-  for (const store of ['file', 'keyring']) {
-    const server = new AppServer(executable, cwd, { ...OFFICIAL_ACCOUNT_PROBE, cli_auth_credentials_store: store });
+type ProbeContext = CodexProbeDiagnostic['context'];
+
+async function probe<T>(diagnostics: CodexProbeDiagnostic[], context: ProbeContext, method: string, signal: AbortSignal, call: () => Promise<T>) {
+  try {
+    const value = await call();
+    diagnostics.push({ context, method, status: 'ok', rpcCode: null, message: null });
+    return value;
+  } catch (error) {
+    signal.throwIfAborted();
+    diagnostics.push({ context, method, status: 'error', rpcCode: error instanceof CodexRpcError ? error.rpcCode : null, message: publicError(error) });
+    return null;
+  }
+}
+
+async function requestVersion(server: AppServer, signal: AbortSignal) {
+  const version = await server.initialize(signal);
+  if (!version) throw new CodexError('Codex 没有报告可识别的版本。');
+  return version;
+}
+
+function readAccount(server: AppServer, signal: AbortSignal) {
+  return server.request('account/read', { refreshToken: false }, signal);
+}
+
+async function findAccountStore(
+  executable: string, cwd: string, expected: Fields, version: string, config: Fields,
+  signal: AbortSignal, diagnostics: CodexProbeDiagnostic[],
+) {
+  for (const store of ['file', 'keyring'] as const) {
+    const context = `storage-${store}` as const;
+    const server = new AppServer(executable, cwd, { ...PROBE_CONFIG, ...config, cli_auth_credentials_store: store });
     try {
-      await server.initialize(signal);
-      const account = await server.request('account/read', { refreshToken: false }, signal);
-      if (sameAccount(expected, account)) return store;
-    } catch {
-      signal.throwIfAborted();
+      const selected = await probe(diagnostics, context, 'initialize', signal, () => requestVersion(server, signal));
+      if (selected !== version) continue;
+      const account = await probe(diagnostics, context, 'account/read', signal, async () => {
+        const received = await readAccount(server, signal);
+        if (received.requiresOpenaiAuth !== true || !sameAccount(expected, received)) {
+          throw new CodexError('此凭据存储未报告同一托管账号。');
+        }
+        return received;
+      });
+      if (account) return store;
     } finally {
       await server.close();
     }
@@ -153,46 +197,70 @@ export async function inspectCodex(signal: AbortSignal, configuredExecutablePath
   };
 
   return withEmptyDirectory(async (cwd) => {
+    const binaryIdentity = codexExecutableIdentity(executable);
     const current = new AppServer(executable, cwd, PROBE_CONFIG);
     let official: AppServer | null = null;
-    const connection = { ...emptyConnection('checking'), configuredExecutablePath, executablePath: executable };
+    const diagnostics: CodexProbeDiagnostic[] = [];
+    const connection = { ...emptyConnection('checking'), configuredExecutablePath, executablePath: executable, diagnostics };
+    const detail = (context: ProbeContext, method: string) =>
+      diagnostics.find((entry) => entry.context === context && entry.method === method && entry.status === 'error')?.message;
     try {
       // Initialize the first app-server fully before starting another against the same SQLite home.
-      const version = await current.initialize(signal);
-      connection.version = version;
+      const currentVersion = await probe(diagnostics, 'configured', 'initialize', signal, () => requestVersion(current, signal));
       official = new AppServer(executable, cwd, OFFICIAL_ACCOUNT_PROBE);
-      await official.initialize(signal);
+      const officialServer = official;
+      const officialVersion = await probe(diagnostics, 'official', 'initialize', signal, () => requestVersion(officialServer, signal));
+      connection.version = currentVersion ?? officialVersion;
+      if (currentVersion && officialVersion && currentVersion !== officialVersion) throw new CodexError('两次 Codex 检查返回了不同的程序版本。');
       const [configured, activeAccount, officialAccount] = await Promise.all([
-        current.request('modelProvider/list', {}, signal),
-        current.request('account/read', { refreshToken: false }, signal),
-        official.request('account/read', { refreshToken: false }, signal),
+        currentVersion ? probe(diagnostics, 'configured', 'modelProvider/list', signal, () => current.request('modelProvider/list', {}, signal)) : null,
+        currentVersion ? probe(diagnostics, 'configured', 'account/read', signal, () => readAccount(current, signal)) : null,
+        officialVersion ? probe(diagnostics, 'official', 'account/read', signal, () => readAccount(officialServer, signal)) : null,
       ]);
-      connection.configuredProvider = string(configured.defaultProviderId);
-      const activeMode = accountMode(activeAccount);
-      const officialMode = accountMode(officialAccount);
-      const account = connection.account = officialMode === 'chatgpt' ? 'chatgpt' : activeMode === 'signedOut' ? officialMode : activeMode;
-      if (account === 'signedOut') return { connection: {
-        ...connection, state: 'signedOut', message: 'Codex 未登录。请在官方 Codex 客户端登录，然后在此刷新。',
-      }, ready: null };
-      if (account === 'other') return { connection: {
-        ...connection, state: 'unsupported', message: 'Codex 报告了其他登录类型。此版本支持 Codex 托管的 ChatGPT 和 API Key 登录。',
-      }, ready: null };
-
-      if (!version) throw new CodexError('Codex 没有报告可识别的版本。');
-      const providerMetadata = account === 'chatgpt' ? await official.request('modelProvider/list', {}, signal) : configured;
-      const { route, config } = chooseRoute(account, configured, providerMetadata, activeAccount.requiresOpenaiAuth === true);
+      connection.configuredProvider = string(configured?.defaultProviderId);
+      const activeMode = activeAccount ? accountMode(activeAccount) : null;
+      const officialMode = officialAccount ? accountMode(officialAccount) : null;
+      const useOfficial = officialMode === 'chatgpt';
+      if (useOfficial && officialAccount && activeAccount && activeMode !== 'signedOut' && !sameAccount(activeAccount, officialAccount)) {
+        throw new CodexError('当前配置和官方上下文报告了不同账号。请在 Codex 检查登录后刷新。');
+      }
+      if (!useOfficial && activeMode === 'chatgpt') {
+        connection.account = activeMode;
+        throw new CodexError('当前配置报告 ChatGPT 登录，官方账号探针未确认该账号。');
+      }
+      const account = connection.account = useOfficial ? 'chatgpt' : activeMode;
+      if (!account) throw new CodexError(detail('configured', 'account/read') ?? detail('configured', 'initialize') ?? 'Codex 未确认当前托管账号。');
+      if (account === 'signedOut' || account === 'other') {
+        return { connection: { ...connection, state: account === 'signedOut' ? 'signedOut' : 'unsupported',
+          message: account === 'signedOut' ? 'Codex 未登录。请在官方 Codex 客户端登录，然后在此刷新。'
+            : '此版本支持 Codex 托管的 ChatGPT 和 API Key 登录。' }, ready: null };
+      }
+      const accountProof = useOfficial ? officialAccount : activeAccount;
+      const binding = accountProof && accountBinding(accountProof);
+      const version = useOfficial ? officialVersion : currentVersion;
+      if (!accountProof || !binding || !version || accountProof.requiresOpenaiAuth !== true) {
+        throw new CodexError('Codex 未能确认可绑定到独立采样进程的托管账号。');
+      }
+      const providerMetadata = useOfficial
+        ? await probe(diagnostics, 'official', 'modelProvider/list', signal, () => officialServer.request('modelProvider/list', {}, signal))
+        : configured;
+      const context = useOfficial ? 'official' : 'configured';
+      if (!providerMetadata) throw new CodexError(detail(context, 'modelProvider/list') ?? 'Codex 未确认检测提供方。');
+      const { route, config } = chooseRoute(account, configured ?? {}, providerMetadata, true);
       connection.route = route;
-      const [listed, store, bundled] = await Promise.all([
-        modelChoices(account === 'chatgpt' ? official : current, route.provider, signal),
-        findAccountStore(executable, cwd, account === 'chatgpt' ? officialAccount : activeAccount, signal),
-        bundledModels(executable, cwd, signal),
+      const [listed, bundled] = await Promise.all([
+        probe(diagnostics, context, 'model/list', signal, () => modelChoices(useOfficial ? officialServer : current, route.provider, signal)),
+        probe(diagnostics, context, 'debug models --bundled', signal, () => bundledModels(executable, cwd, signal)),
       ]);
+      if (!listed || !bundled) throw new CodexError(detail(context, 'model/list') ?? detail(context, 'debug models --bundled') ?? 'Codex 未确认可用模型。');
       const models = listed.filter(({ id }) => bundled.has(id));
       if (!models.length) throw new CodexError('Codex 未返回可隔离工具的文本模型。');
+      const store = await findAccountStore(executable, cwd, accountProof, version, config, signal, diagnostics);
+      if (codexExecutableIdentity(executable) !== binaryIdentity) throw new CodexError('检查期间 Codex 程序已变化，请刷新连接。');
       if (models.length < listed.length) connection.message = `${listed.length - models.length} 个文本模型缺少内置定义，当前列表显示可进行纯文本采样的模型。`;
       const readyConnection = { ...connection, state: 'ready' as const, account, route, version, models };
       const routeConfig = { ...config, cli_auth_credentials_store: store };
-      return { connection: readyConnection, ready: { connection: readyConnection, executable, routeConfig, bundled } };
+      return { connection: readyConnection, ready: { connection: readyConnection, executable, binaryIdentity, accountBinding: binding, routeConfig, bundled } };
     } catch (error) {
       return { connection: { ...connection, state: 'error', message: publicError(error) }, ready: null };
     } finally {

@@ -10,7 +10,9 @@ import { verifyCache } from '../src/bank-integrity.js';
 import { accountMode, chooseRoute, emptyConnection, sameAccount, type ReadyCodex } from '../src/codex.js';
 import { findCodex, savedLoginEnvironment } from '../src/codex-process.js';
 import { CodexSelection } from '../src/codex-selection.js';
+import { clientEvents, cliVersion, claudeAccount, openCodeModels } from '../src/clients.js';
 import { finishDetection, makeDetection, sampleArgs, textOnlyModel, type CollectOptions } from '../src/collect.js';
+import { finishManual, makeManualDetection, saveManualReply } from '../src/manual.js';
 import type { ModelChoice } from '../src/types.js';
 
 const gateway = {
@@ -26,7 +28,7 @@ const model: ModelChoice = { id: 'gpt-test', title: 'GPT Test', effort: 'low', i
 function readyFrom(account: 'apiKey' | 'chatgpt'): ReadyCodex {
   const { route, config } = chooseRoute(account, gateway, official, account === 'apiKey');
   return {
-    executable: 'codex.exe', routeConfig: config, bundled: new Map(),
+    executable: 'codex.exe', binaryIdentity: 'fixture', accountBinding: 'fixture', routeConfig: config, bundled: new Map(),
     connection: { ...emptyConnection('ready'), state: 'ready', account, version: '0.171.0', configuredProvider: 'gateway', route, models: [model] },
   };
 }
@@ -82,10 +84,87 @@ test('corrupt Codex settings require an explicit reset rather than silently sele
   await writeFile(file, '{broken');
   const selection = new CodexSelection(file);
   await assert.rejects(selection.load());
+  const blocked = selection.loadError;
+  assert.match(blocked?.message ?? '', /路径设置无效/);
+  await assert.rejects(selection.save(join(dir, 'missing.exe')));
+  assert.equal(selection.loadError, blocked);
+  assert.equal(await readFile(file, 'utf8'), '{broken');
   await selection.save(null);
+  assert.equal(selection.loadError, null);
   const reopened = new CodexSelection(file);
   await reopened.load();
   assert.equal(reopened.path, null);
+});
+
+test('CLI metadata keeps installed versions, login types and sanitized OpenCode model routing', () => {
+  assert.equal(cliVersion('opencode v2.3.2\n'), '2.3.2');
+  assert.equal(cliVersion('2.1.330 (Claude Code)'), '2.1.330');
+  assert.equal(cliVersion('0.2.2-rc.5'), '0.2.2-rc.5');
+  assert.equal(claudeAccount({ loggedIn: false }), 'signedOut');
+  assert.equal(claudeAccount({ loggedIn: true, authMethod: 'oauth_token', email: 'private' }), 'oauth');
+  assert.equal(claudeAccount({ loggedIn: true, authMethod: 'claude.ai' }), 'claude');
+  const models = openCodeModels('fixture/test\r\nfixture/second\nfixture/test\nmalformed model', [{
+    info: {
+      model: { providerID: 'fixture', model: 'test' },
+      providers: { fixture: { settings: { baseURL: 'https://gateway.example/v1?private=true', apiKey: '***' } } },
+    },
+  }]);
+  assert.equal(models.length, 2);
+  assert.equal(models[0].isDefault, true);
+  assert.equal(models[0].account, 'apiKey');
+  assert.deepEqual(models[0].route, { origin: 'https://gateway.example', provider: 'fixture', kind: 'client-config' });
+  assert.equal(openCodeModels('provider/unknown', [])[0].route?.origin, null);
+});
+
+test('client events preserve assistant replies, reject tools and require a terminal success event', () => {
+  const [claude, code, dsh] = makeDetection(readyFrom('apiKey'), model).samples;
+  const frame = (parser: ReturnType<typeof clientEvents>, data: unknown) => parser.onLine(JSON.stringify(data));
+  const claudeParser = clientEvents('claude-code', claude, () => {});
+  frame(claudeParser, { type: 'system', subtype: 'init', session_id: 'claude-1', model: 'claude-sonnet-fixture', tools: [], mcp_servers: [] });
+  frame(claudeParser, { type: 'assistant', message: { id: 'msg-1', content: [{ type: 'text', text: '5, 11' }, { type: 'thinking', text: '99' }] } });
+  assert.notEqual(claudeParser.outcome(0, ''), null);
+  frame(claudeParser, { type: 'result', subtype: 'success', is_error: false, result: '5, 11\n' });
+  assert.equal(claudeParser.outcome(0, ''), null);
+  assert.equal(claude.raw, '5, 11\n');
+  assert.equal(claude.clientModel, 'claude-sonnet-fixture');
+  const codeParser = clientEvents('opencode', code, () => {});
+  frame(codeParser, { type: 'text', sessionID: 'session-1', part: { text: '49, ' } });
+  frame(codeParser, { type: 'text', sessionID: 'session-1', part: { text: '79' } });
+  frame(codeParser, { type: 'step_finish', sessionID: 'session-1', part: { reason: 'stop' } });
+  assert.equal(codeParser.outcome(0, ''), null);
+  assert.equal(code.raw, '49, 79');
+  assert.equal(frame(codeParser, { type: 'tool_use', sessionID: 'session-1' }), false);
+  assert.match(codeParser.outcome(0, '') ?? '', /排除评分/);
+  const dshParser = clientEvents('dsh-cli', dsh, () => {});
+  frame(dshParser, { type: 'session', sessionId: 'dsh-1' });
+  frame(dshParser, { type: 'thinking', text: '44' });
+  frame(dshParser, { type: 'final', sessionId: 'dsh-1', reason: { kind: 'completed' }, text: '44, 79' });
+  assert.equal(dshParser.outcome(0, ''), null);
+  assert.equal(dsh.raw, '44, 79');
+  assert.match(dshParser.outcome(1, 'MISSING_CREDENTIAL: no API key for provider route "deepseek-official"') ?? '', /deepseek-official/);
+});
+
+test('manual desktop evidence uses original text and explicitly leaves the route unverified', () => {
+  const run = makeManualDetection('claude-desktop', '5.11492.5.0', 'Claude model from UI');
+  const opts = { signal: new AbortController().signal, update: () => {}, bank: () => null };
+  assert.equal(finishManual(run, opts), false);
+  assert.equal(saveManualReply(run, 0, ' 8, 31, 40\n'), true);
+  assert.equal(saveManualReply(run, 1, ' '.repeat(262145) + '5'), false);
+  assert.equal(saveManualReply(run, 3, '5'), false);
+  assert.equal(finishManual(run, opts), true);
+  assert.equal(run.samples[0].raw, ' 8, 31, 40\n');
+  assert.equal(run.samples[1].status, 'skipped');
+  assert.equal(run.source, 'claude-desktop');
+  assert.equal(run.route, null);
+  assert.equal(run.account, null);
+  assert.equal(run.conditions, 'manual-unverified');
+  assert.equal(run.status, 'bankUnavailable');
+  const cancelled = makeManualDetection('dsh-desktop', null, '');
+  assert.equal(saveManualReply(cancelled, 0, '8'), true);
+  assert.equal(finishManual(cancelled, { ...opts, signal: AbortSignal.abort() }), true);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.samples[0].raw, '8');
+  assert.equal(cancelled.samples[1].status, 'cancelled');
 });
 test('ChatGPT keeps the official endpoint and rejects an unconfirmed provider override', () => {
   const ready = readyFrom('chatgpt');
@@ -116,6 +195,7 @@ test('Codex preserves explicit profiles and API-key safety while isolating SQLit
   assert(sameAccount(chatgpt, structuredClone(chatgpt)));
   assert(!sameAccount(chatgpt, { ...chatgpt, userId: 'another-test-id' }));
   assert(!sameAccount(chatgpt, { account: { type: 'apiKey' } }));
+  assert(!sameAccount({ account: { type: 'chatgpt' } }, { account: { type: 'chatgpt' } }));
 
   const userProfile = await mkdtemp(join(tmpdir(), 'opensosen-codex-environment-'));
   t.after(() => rm(userProfile, { recursive: true, force: true }));

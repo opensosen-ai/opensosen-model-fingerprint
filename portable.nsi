@@ -36,6 +36,16 @@ Section
   ExecWait '"$OUTDIR\OpenSosenModelFingerprint.exe"' $0
   IfErrors failed
   SetOutPath "$TEMP"
+  ; Chromium subprocesses can keep the shared executable open briefly.
+  StrCpy $1 20
+  cleanup:
+    ClearErrors
+    Delete "$PLUGINSDIR\app\OpenSosenModelFingerprint.exe"
+    IfErrors 0 finished
+    Sleep 200
+    IntOp $1 $1 - 1
+    IntCmp $1 0 finished finished cleanup
+  finished:
   SetErrorLevel $0
   Goto done
 

@@ -4,6 +4,7 @@ import { CodexError, findCodex } from './codex-process.js';
 
 export class CodexSelection {
   path: string | null = null;
+  loadError: CodexError | null = null;
 
   constructor(private readonly file: string) {}
 
@@ -13,7 +14,8 @@ export class CodexSelection {
       text = await readFile(this.file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw new CodexError('无法读取 Codex 路径设置，请重新选择程序或恢复 PATH 自动查找。');
+      this.loadError = new CodexError('无法读取 Codex 路径设置，请重新选择程序或恢复 PATH 自动查找。');
+      throw this.loadError;
     }
     try {
       const saved = JSON.parse(text);
@@ -23,7 +25,8 @@ export class CodexSelection {
       }
       this.path = path as string | null;
     } catch {
-      throw new CodexError('Codex 路径设置无效，请重新选择程序或恢复 PATH 自动查找。');
+      this.loadError = new CodexError('Codex 路径设置无效，请重新选择程序或恢复 PATH 自动查找。');
+      throw this.loadError;
     }
   }
 
@@ -37,6 +40,7 @@ export class CodexSelection {
       await writeFile(temporary, JSON.stringify({ executable: path }) + '\n', 'utf8');
       await rename(temporary, this.file);
       this.path = path;
+      this.loadError = null;
     } catch {
       throw new CodexError('无法保存 Codex 路径设置，原来的选择保持不变。');
     } finally {

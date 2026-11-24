@@ -1,11 +1,28 @@
 import type { Analysis } from 'lmfpd-sdk';
 
-export type AccountMode = 'chatgpt' | 'apiKey' | 'signedOut' | 'other';
+export const sources = {
+  codex: { title: 'Codex', mode: 'automatic' },
+  'claude-code': { title: 'Claude Code', mode: 'automatic' },
+  'claude-desktop': { title: 'Claude Windows 桌面', mode: 'manual' },
+  opencode: { title: 'OpenCode', mode: 'automatic' },
+  'dsh-desktop': { title: 'DeepSeek Harness Windows 桌面', mode: 'manual' },
+  'dsh-cli': { title: 'DeepSeek Harness CLI', mode: 'automatic' },
+} as const;
+
+export type Source = keyof typeof sources;
+export type ManualSource = { [S in Source]: (typeof sources)[S]['mode'] extends 'manual' ? S : never }[Source];
+export type CliSource = Exclude<Source, 'codex' | ManualSource>;
+
+export function isManualSource(source: Source): source is ManualSource {
+  return sources[source].mode === 'manual';
+}
+
+export type AccountMode = 'chatgpt' | 'apiKey' | 'signedOut' | 'other' | 'claude' | 'oauth' | 'clientConfigured';
 
 export interface Route {
   provider: string;
-  origin: string;
-  kind: 'chatgpt' | 'openai-api' | 'custom';
+  origin: string | null;
+  kind: 'chatgpt' | 'openai-api' | 'custom' | 'client-config';
 }
 
 export interface ModelChoice {
@@ -13,6 +30,16 @@ export interface ModelChoice {
   title: string;
   effort: string | null;
   isDefault: boolean;
+  route?: Route | null;
+  account?: AccountMode | null;
+}
+
+export interface CodexProbeDiagnostic {
+  context: 'configured' | 'official' | 'storage-file' | 'storage-keyring';
+  method: string;
+  status: 'ok' | 'error';
+  rpcCode: number | null;
+  message: string | null;
 }
 
 export interface Connection {
@@ -25,6 +52,8 @@ export interface Connection {
   message: string | null;
   configuredExecutablePath: string | null;
   executablePath: string | null;
+  note?: string;
+  diagnostics?: CodexProbeDiagnostic[];
 }
 
 export interface BankInfo {
@@ -43,25 +72,36 @@ export interface SampleEvidence {
   prompt: string;
   expected: number;
   count: number;
-  status: 'queued' | 'running' | 'received' | 'failed' | 'cancelled' | 'timeout';
+  status: 'queued' | 'running' | 'received' | 'failed' | 'cancelled' | 'timeout' | 'skipped';
   raw: string;
   threadId: string | null;
+  clientModel?: string;
   durationMs: number | null;
   error: string | null;
 }
 
-export interface Detection {
+export interface DetectionSource {
+  source: Source;
+  mode: 'automatic' | 'manual';
+  clientVersion: string | null;
+  codexVersion?: string;
+  executablePath: string | null;
+  account: AccountMode | null;
+  model: string;
+  effort: string | null;
+  route: Route | null;
+  transport: string;
+  routeBasis: string;
+  conditions: 'isolated-config' | 'agent-context-unverified' | 'manual-unverified';
+  limitation: string | null;
+  diagnostics?: CodexProbeDiagnostic[];
+}
+
+export interface Detection extends DetectionSource {
   id: string;
   startedAt: string;
   finishedAt: string | null;
-  codexVersion: string;
-  executablePath: string;
   sdk: '0.2.0';
-  account: AccountMode;
-  model: string;
-  effort: string | null;
-  route: Route;
-  transport: 'codex exec --json';
   status: 'running' | 'scored' | 'partial' | 'unscorable' | 'not_model' | 'failed' | 'cancelled' | 'timeout' | 'bankUnavailable';
   samples: SampleEvidence[];
   bank: BankInfo | null;
@@ -70,6 +110,7 @@ export interface Detection {
 }
 
 export interface DesktopState {
+  source: Source;
   connection: Connection;
   bank: BankState;
   detection: Detection | null;
@@ -78,11 +119,15 @@ export interface DesktopState {
 
 export interface DesktopApi {
   state(): Promise<DesktopState>;
+  selectSource(source: Source): Promise<void>;
   refreshConnection(): Promise<void>;
   chooseCodex(): Promise<void>;
   usePathCodex(): Promise<void>;
   refreshBank(): Promise<void>;
-  start(model: string): Promise<boolean>;
+  start(source: Source, model: string): Promise<boolean>;
+  copyChallenge(index: number): Promise<boolean>;
+  saveReply(index: number, text: string): Promise<boolean>;
+  scoreReplies(): Promise<boolean>;
   cancel(): Promise<void>;
   exportEvidence(): Promise<{ path: string | null }>;
   onState(listener: (state: DesktopState) => void): void;

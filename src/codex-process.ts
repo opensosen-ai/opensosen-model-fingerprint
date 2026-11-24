@@ -24,6 +24,19 @@ export function array(value: unknown): unknown[] {
 
 export class CodexError extends Error {}
 
+export class CodexRpcError extends CodexError {
+  constructor(method: string, readonly rpcCode: number | null) {
+    super(`Codex ${method} 接口错误（RPC ${rpcCode ?? '未知'}）。请检查所选 Codex 是否支持该接口。`);
+  }
+}
+
+export function codexExecutableIdentity(executable: string) {
+  const file = statSync(executable);
+  return createHash('sha256').update(JSON.stringify([
+    resolve(executable).toLowerCase(), file.size, file.mtimeMs,
+  ])).digest('hex');
+}
+
 // Use the npm shim's native payload. Node and PowerShell are not needed at run time.
 // An explicit executable is authoritative; null/undefined keeps the PATH-first behavior.
 export async function findCodex(explicitPath?: string | null): Promise<string | null> {
@@ -76,10 +89,7 @@ export function savedLoginEnvironment(inherited: NodeJS.ProcessEnv, executable: 
   const sqliteKey = Object.keys(inherited).find((name) => name.toUpperCase() === 'CODEX_SQLITE_HOME');
   if (!sqliteKey || !inherited[sqliteKey]?.trim()) {
     // Keep auth/config in CODEX_HOME, but never mix SQLite migrations from different CLI builds.
-    const file = statSync(executable);
-    const identity = createHash('sha256').update(JSON.stringify([
-      resolve(executable).toLowerCase(), file.size, file.mtimeMs,
-    ])).digest('hex').slice(0, 20);
+    const identity = codexExecutableIdentity(executable).slice(0, 20);
     const localData = inherited.LOCALAPPDATA || join(userHome, 'AppData', 'Local');
     const sqliteHome = join(localData, 'OpenSosen Model Fingerprint', 'sqlite', identity);
     mkdirSync(sqliteHome, { recursive: true });
@@ -154,7 +164,7 @@ export class AppServer {
       const request = this.#requests.get(msg.id);
       if (msg.error) {
         const code = object(msg.error).code;
-        request?.reject(new CodexError(`Codex ${request.method} 接口错误（RPC ${typeof code === 'number' ? code : '未知'}）。请检查所选 Codex 是否支持该接口。`));
+        if (request) request.reject(new CodexRpcError(request.method, typeof code === 'number' ? code : null));
       } else request?.resolve(object(msg.result));
     });
     this.#closed = new Promise((resolve) => child.once('close', () => {

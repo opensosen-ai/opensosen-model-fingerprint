@@ -25,7 +25,9 @@
           <h2 id="setup-title">检测设置</h2>
           <button id="refresh" class="secondary" type="button">刷新连接</button>
         </div>
-        <div class="codex-selector" aria-label="Codex 程序设置">
+        <label for="source">检测来源</label>
+        <select id="source" class="source-select"></select>
+        <div id="codex-settings" class="codex-selector" aria-label="Codex 程序设置">
           <div class="codex-selection-head">
             <strong>Codex 程序</strong>
             <span id="codex-mode" class="secondary-text">自动查找（PATH）</span>
@@ -38,19 +40,21 @@
           <p class="fine-print">默认从 PATH 查找；手动选择会保存，切换后自动刷新连接。</p>
         </div>
         <dl class="connection-details">
-          <div><dt>Codex 登录方式</dt><dd id="account">读取中…</dd></div>
+          <div><dt>登录方式</dt><dd id="account">读取中…</dd></div>
           <div><dt>检测通道</dt><dd id="route">读取中…</dd></div>
         </dl>
         <p id="route-detail" class="fine-print" hidden></p>
         <p id="connection-message" class="callout" role="status" hidden></p>
+        <details id="probe-diagnostics" hidden><summary>连接诊断</summary><ul id="probe-failures"></ul></details>
         <form id="detect-form">
-          <label for="model">目标模型</label>
+          <label id="model-label" for="model">目标模型</label>
           <div class="controls">
             <select id="model" aria-describedby="sample-note" disabled><option>正在读取列表…</option></select>
+            <input id="manual-model" maxlength="120" aria-describedby="sample-note" placeholder="填写桌面端显示的模型（可选）" hidden>
             <button id="start" class="primary" type="submit" disabled>开始检测</button>
             <button id="cancel" class="secondary" type="button" hidden>取消</button>
           </div>
-          <p id="sample-note" class="fine-print">每次检测提交三条独立的数字挑战，使用所选通道的额度。</p>
+          <p id="sample-note" class="fine-print"></p>
         </form>
       </section>
 
@@ -60,6 +64,11 @@
           <span id="progress-count" class="mono secondary-text" role="status">0 / 3 已收到</span>
         </div>
         <ol id="samples" class="samples"></ol>
+        <div id="manual-samples" class="manual-samples" hidden>
+          <p class="fine-print">每题在所选桌面应用中新开对话，只粘贴挑战。关闭可关闭的工具，收到回复后原样粘贴并保存。</p>
+          <div id="manual-replies"></div>
+          <button id="score-replies" class="primary" type="button" disabled>评分已保存回复</button>
+        </div>
       </section>
 
       <section class="panel result" aria-labelledby="result-title">

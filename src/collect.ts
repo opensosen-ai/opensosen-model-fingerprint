@@ -1,12 +1,12 @@
 import { unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateChallenges, parseNumbers, type Challenge, type Detector } from 'lmfpd-sdk';
-import { CodexError, launch, messages, object, overrides, string, withEmptyDirectory, type Fields } from './codex-process.js';
+import { CodexError, codexExecutableIdentity, launch, messages, object, overrides, string, withEmptyDirectory, type Fields } from './codex-process.js';
 import type { ReadyCodex } from './codex.js';
-import type { BankInfo, Detection, ModelChoice, SampleEvidence } from './types.js';
+import type { BankInfo, Detection, DetectionSource, ModelChoice, SampleEvidence } from './types.js';
 
 export const SAMPLE_TIMEOUT_MS = 120_000;
-const MAX_REPLY_LENGTH = 256 * 1024;
+export const MAX_REPLY_LENGTH = 256 * 1024;
 
 // CLI-local config. The `--ignore-user-config` switch is required because an
 // empty MCP table alone merges with inherited server entries in app-server.
@@ -104,10 +104,19 @@ export interface CollectOptions {
 }
 
 export function makeDetection(codex: ReadyCodex, model: ModelChoice): Detection {
+  return createDetection({
+    source: 'codex', mode: 'automatic', clientVersion: codex.connection.version,
+    codexVersion: codex.connection.version, executablePath: codex.executable, account: codex.connection.account,
+    model: model.id, effort: model.effort, route: codex.connection.route, transport: 'codex exec --json',
+    routeBasis: 'Codex 提供方元数据与采样进程配置', conditions: 'isolated-config', limitation: null,
+    diagnostics: codex.connection.diagnostics,
+  });
+}
+
+export function createDetection(source: DetectionSource): Detection {
   return {
     id: crypto.randomUUID(), startedAt: new Date().toISOString(), finishedAt: null,
-    codexVersion: codex.connection.version, executablePath: codex.executable, sdk: '0.2.0', account: codex.connection.account,
-    model: model.id, effort: model.effort, route: codex.connection.route, transport: 'codex exec --json',
+    ...source, sdk: '0.2.0',
     status: 'running', bank: null, analysis: null, message: null,
     samples: generateChallenges(3).map((challenge: Challenge) => ({
       prompt: challenge.prompt, expected: challenge.expected_count, count: 0, status: 'queued',
@@ -226,6 +235,7 @@ export function finishDetection(detection: Detection, options: CollectOptions, r
 }
 
 export async function collect(codex: ReadyCodex, model: ModelChoice, detection: Detection, options: CollectOptions) {
+  if (codexExecutableIdentity(codex.executable) !== codex.binaryIdentity) throw new CodexError('采样前 Codex 程序已变化，请刷新连接。');
   const entry = codex.bundled.get(model.id);
   if (!entry) throw new CodexError('所选模型缺少可确认的纯文本配置。');
   const reference = options.bank();

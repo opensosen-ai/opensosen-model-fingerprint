@@ -12,7 +12,7 @@
 [hidden] { display: none !important; }
 body { margin: 0; }
 h1, h2, h3, h4, p, dd { margin: 0; }
-button, select { font: inherit; }
+button, select, input, textarea { font: inherit; }
 button, select, summary { -webkit-tap-highlight-color: transparent; }
 :focus-visible { outline: 2px solid #0c786d; outline-offset: 3px; }
 
@@ -88,6 +88,16 @@ button:disabled { cursor: default; opacity: .52; }
 .samples li[data-status='running'] { background: #e9f7f4; border-color: #b2dcd4; }
 .samples li[data-status='running'] .sample-status, .samples li[data-status='received'] .sample-status { color: #086a5e; }
 .samples li[data-status='failed'] .sample-status, .samples li[data-status='timeout'] .sample-status { color: #9a3729; }
+.source-select { width: 100%; margin: 4px 0 14px; }
+#manual-model, .manual-samples textarea {
+  min-width: 0; width: 100%; padding: 9px 10px; color: inherit; border: 1px solid #b9cad3; border-radius: 7px; background: #fff;
+}
+.manual-samples { margin-top: 14px; }
+.manual-samples .sample-evidence > button { margin-top: 8px; }
+.manual-samples label { margin-top: 10px; }
+.manual-samples textarea { display: block; resize: vertical; }
+.manual-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+#score-replies { margin-top: 12px; }
 
 .empty { border: 1px dashed #ccd9e0; background: #f9fbfc; border-radius: 9px; padding: 21px 14px; color: var(--muted); }
 .result-heading { font-size: 18px; margin-bottom: 5px; }
